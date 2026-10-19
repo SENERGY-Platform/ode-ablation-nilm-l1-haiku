@@ -9,6 +9,9 @@ bucket is the change of that counter across the bucket, times the transformer
 factor (METER_FACTOR), converted to watts. Features are built the same way here
 and in op.py; design_matrix() is the single place the feature order is defined.
 
+A covariate that is not among the launch's input topics is read as zero, both
+here and in op.py, so a launch with the main meter alone is consistent.
+
 The model is a linear least-squares fit with an hour-of-day intercept. It is a
 baseline for this operator, not a claim that it is the right model.
 """
@@ -164,8 +167,15 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         if not inputs or not labels:
             return None
         main = _series(inputs, MAIN)
-        heat = _series(inputs, HEAT)
-        ev = _series(inputs, EV)
+        try:
+            heat = _series(inputs, HEAT)
+        except ValueError:
+            # Not among this launch's topics: the operator reads it as zero too.
+            heat = pd.Series(0.0, index=main.index)
+        try:
+            ev = _series(inputs, EV)
+        except ValueError:
+            ev = pd.Series(0.0, index=main.index)
         target = _series(labels, TARGET)
 
     rows = _training_rows(main, heat, ev, target)
@@ -194,8 +204,18 @@ def train_model(logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         {
             "training_window_days": TRAINING_WINDOW.days,
             "meter_factor": METER_FACTOR,
+            "covariates": "none" if HEAT not in _names(inputs) and EV not in _names(inputs) else "partial",
             "model": "linear_hour_of_day_with_partial_bucket",
         }
     )
     logger.log_metrics({"train_rows": float(len(y)), "train_mae_w": mae})
     return OdeAblationNilmL1HaikuModel(coefficients=beta.tolist())
+
+
+def _names(refs) -> typing.Set[str]:
+    """The destination columns the input datasets carry, for the run's params."""
+    names = set()
+    for ref in refs:
+        ds = ray.get(ref) if isinstance(ref, ray.ObjectRef) else ref
+        names.update(ds.schema().names)
+    return names
